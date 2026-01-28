@@ -1,0 +1,23 @@
+# ACI to NetBox Sync - Dependencies
+
+# NetBox API client
+pynetbox>=7.0.0
+
+# Cisco ACI Cobra SDK (install from APIC or Cisco DevNet)
+# acicobra  # Install from APIC downloads
+# acimodel  # Install from APIC downloads
+
+# Configuration file support
+pyyaml>=6.0
+
+# HTTP client (used by pynetbox)
+requests>=2.28.0
+
+# Optional: for parallel processing
+# concurrent-futures  # Built into Python 3
+
+# Development dependencies (optional)
+# pytest>=7.0.0
+# pytest-cov>=4.0.0
+# black>=23.0.0
+# ruff>=0.1.0

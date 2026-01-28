@@ -1,0 +1,8 @@
+
+config.yaml
+pyvenv.cfg
+aci_netbox_sync.egg-info/
+__pycache__/
+bin/
+lib/
+include/

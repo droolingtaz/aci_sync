@@ -1,0 +1,46 @@
+# ACI to NetBox Sync - Configuration File
+# Copy to config.yaml and update with your settings
+
+# ACI APIC Connection Settings
+aci:
+  host: "apic.example.com"
+  username: "admin"
+  password: "your-password-here"
+  verify_ssl: false
+  timeout: 30
+
+# NetBox Connection Settings
+netbox:
+  url: "https://netbox.example.com"
+  token: "your-api-token-here"
+  verify_ssl: true
+  timeout: 30
+
+# Synchronization Settings
+sync:
+  # Number of objects to process in each batch
+  batch_size: 50
+  
+  # Maximum parallel workers (note: sequential recommended for NetBox API)
+  max_workers: 1
+  
+  # If true, show what would be synced without making changes
+  dry_run: false
+  
+  # Verify that updates were successfully applied
+  verify_updates: true
+  
+  # Continue syncing after encountering errors
+  continue_on_error: true
+  
+  # Enable/disable specific object types
+  sync_fabrics: true
+  sync_fabric_nodes: true
+  sync_tenants: true
+  sync_vrfs: true
+  sync_bridge_domains: true
+  sync_subnets: true
+  sync_app_profiles: true
+  sync_epgs: true
+  sync_esgs: true
+  sync_contracts: true
