@@ -37,14 +37,17 @@ class BridgeDomainSyncModule(BaseSyncModule):
                 return False
 
             vrf_name = aci_data.get('vrf')
+            vrf_tenant = aci_data.get('vrf_tenant', tenant_name)  # VRF might be in different tenant (e.g., common)
             vrf_map = self.context.get('vrf_map', {})
-            vrf_id = vrf_map.get(f"{tenant_name}/{vrf_name}") if vrf_name else None
+            
+            # Look up VRF using its actual tenant (might be different from BD's tenant)
+            vrf_id = vrf_map.get(f"{vrf_tenant}/{vrf_name}") if vrf_name else None
             
             # NetBox ACI plugin requires VRF - skip BDs without VRF assignment
             if not vrf_id:
                 bd_name = aci_data.get('name')
                 if vrf_name:
-                    logger.warning(f"VRF {vrf_name} not found for BD {tenant_name}/{bd_name} - skipping")
+                    logger.warning(f"VRF {vrf_tenant}/{vrf_name} not found for BD {tenant_name}/{bd_name} - skipping")
                 else:
                     logger.warning(f"BD {tenant_name}/{bd_name} has no VRF assigned - NetBox ACI plugin requires VRF")
                 return False
@@ -106,6 +109,14 @@ class BridgeDomainSyncModule(BaseSyncModule):
                 logger.info(f"Created Bridge Domain: {tenant_name}/{bd_name}")
             else:
                 updates = {}
+                
+                # Check if VRF has changed (important for cross-tenant VRF references)
+                current_vrf = getattr(bd, 'aci_vrf', None)
+                current_vrf_id = current_vrf.id if hasattr(current_vrf, 'id') else current_vrf
+                if current_vrf_id != vrf_id:
+                    updates['aci_vrf'] = vrf_id
+                    logger.debug(f"BD {bd_name} VRF changed: {current_vrf_id} -> {vrf_id}")
+                
                 for aci_field, nb_field in bd_field_mapping.items():
                     if aci_field in aci_data and aci_data[aci_field] is not None:
                         value = aci_data[aci_field]
@@ -234,6 +245,14 @@ class SubnetSyncModule(BaseSyncModule):
                 logger.info(f"Created Subnet: {subnet_ip} in BD {bd_name}")
             else:
                 updates = {}
+                
+                # Check if BD has changed (subnet moved to different BD)
+                current_bd = getattr(subnet, 'aci_bridge_domain', None)
+                current_bd_id = current_bd.id if hasattr(current_bd, 'id') else current_bd
+                if current_bd_id != bd_id:
+                    updates['aci_bridge_domain'] = bd_id
+                    logger.debug(f"Subnet {subnet_ip} BD changed: {current_bd_id} -> {bd_id}")
+                
                 for key, value in subnet_params.items():
                     current = getattr(subnet, key, None)
                     if not values_equal(current, value):

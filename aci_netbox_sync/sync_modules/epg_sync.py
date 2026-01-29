@@ -103,6 +103,14 @@ class EPGSyncModule(BaseSyncModule):
                 logger.info(f"Created EPG: {tenant_name}/{ap_name}/{epg_name}")
             else:
                 updates = {}
+                
+                # Check if BD has changed
+                current_bd = getattr(epg, 'aci_bridge_domain', None)
+                current_bd_id = current_bd.id if hasattr(current_bd, 'id') else current_bd
+                if current_bd_id != bd_id:
+                    updates['aci_bridge_domain'] = bd_id
+                    logger.debug(f"EPG {epg_name} BD changed: {current_bd_id} -> {bd_id}")
+                
                 for aci_field, nb_field in epg_field_mapping.items():
                     if aci_field in aci_data:
                         aci_value = aci_data[aci_field]

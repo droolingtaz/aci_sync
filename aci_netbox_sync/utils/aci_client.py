@@ -323,20 +323,28 @@ class ACIClient:
                 dn_parts = str(bd.dn).split('/')
                 tenant_name = dn_parts[1].replace('tn-', '') if len(dn_parts) > 1 else None
 
-                # Get associated VRF
+                # Get associated VRF - extract both VRF name and its tenant
                 vrf_name = None
+                vrf_tenant = None
                 if hasattr(bd, 'children'):
                     for child in bd.children:
                         if child.__class__.__name__ == 'RsCtx':
                             vrf_dn = str(child.tDn) if hasattr(child, 'tDn') else None
                             if vrf_dn:
-                                vrf_name = vrf_dn.split('/')[-1].replace('ctx-', '')
+                                # Parse DN like "uni/tn-common/ctx-default"
+                                vrf_dn_parts = vrf_dn.split('/')
+                                for part in vrf_dn_parts:
+                                    if part.startswith('tn-'):
+                                        vrf_tenant = part.replace('tn-', '')
+                                    elif part.startswith('ctx-'):
+                                        vrf_name = part.replace('ctx-', '')
 
                 bds.append({
                     'name': str(bd.name),
                     'dn': str(bd.dn),
                     'tenant': tenant_name,
                     'vrf': vrf_name,
+                    'vrf_tenant': vrf_tenant,  # The tenant where the VRF actually lives
                     'name_alias': str(bd.nameAlias) if hasattr(bd, 'nameAlias') and bd.nameAlias else None,
                     'description': str(bd.descr) if hasattr(bd, 'descr') and bd.descr else None,
                     'arp_flood': str(bd.arpFlood) == 'yes' if hasattr(bd, 'arpFlood') else False,

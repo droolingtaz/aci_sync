@@ -40,7 +40,7 @@ A modular Python solution for synchronizing Cisco ACI (Application Centric Infra
 1. **Clone or download the project**:
    ```bash
    git clone <repository-url>
-   cd aci_sync
+   cd aci_netbox_sync
    ```
 
 2. **Install Python dependencies**:
