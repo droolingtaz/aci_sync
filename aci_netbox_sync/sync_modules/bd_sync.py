@@ -1,28 +1,89 @@
 """
 Bridge Domain Sync Module - Synchronize ACI Bridge Domains and Subnets to NetBox.
+
+Optimized with:
+- FIELD_MAP / CONVERTERS for DRY field comparison
+- Per-tenant pre-fetch caching
+- MAC validation in converters
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .base import BaseSyncModule, values_equal
 
 logger = logging.getLogger(__name__)
 
 
+def _valid_mac(value: Any) -> Optional[str]:
+    """Return MAC string if valid, else None."""
+    if not value:
+        return None
+    s = str(value)
+    if s.lower() in ('not-applicable', 'n/a', 'none', ''):
+        return None
+    if ':' not in s and '-' not in s:
+        return None
+    return s
+
+
 class BridgeDomainSyncModule(BaseSyncModule):
     """Sync ACI Bridge Domains to NetBox."""
+
+    FIELD_MAP = {
+        'name_alias': 'name_alias',
+        'description': 'description',
+        'arp_flood': 'arp_flooding_enabled',
+        'ip_learning': 'ip_data_plane_learning_enabled',
+        'limit_ip_learn': 'limit_ip_learn_enabled',
+        'mac': 'mac_address',
+        'multi_dest_pkt_act': 'multi_destination_flooding',
+        'unicast_route': 'unicast_routing_enabled',
+        'unk_mac_ucast_act': 'unknown_unicast',
+        'unk_mcast_act': 'unknown_ipv4_multicast',
+        'v6_unk_mcast_act': 'unknown_ipv6_multicast',
+        'vmac': 'virtual_mac_address',
+        'pim_v4_enabled': 'pim_ipv4_enabled',
+        'host_route_adv': 'advertise_host_routes_enabled',
+        'ep_move_detect': 'ep_move_detection_enabled',
+    }
+
+    CONVERTERS = {
+        'mac': _valid_mac,
+        'vmac': _valid_mac,
+        'ep_move_detect': lambda v: v == 'garp',
+    }
 
     @property
     def object_type(self) -> str:
         return "BridgeDomain"
 
+    def pre_sync(self) -> None:
+        """Pre-fetch existing BDs per tenant."""
+        self._tenant_bd_caches: Dict[int, Dict] = {}
+        tenant_map = self.context.get('tenant_map', {})
+        for tenant_name, tenant_id in tenant_map.items():
+            cache = self.netbox.fetch_all_bridge_domains(tenant_id)
+            self._tenant_bd_caches[tenant_id] = cache
+            logger.debug(f"Pre-fetched {len(cache)} BDs for tenant {tenant_name}")
+
     def fetch_from_aci(self) -> List[Dict[str, Any]]:
-        """Fetch Bridge Domains from ACI."""
         return self.aci.get_bridge_domains()
 
+    def _build_params(self, aci_data, field_map=None, converters=None):
+        """Override to skip None values from MAC converter."""
+        params = super()._build_params(aci_data, field_map, converters)
+        # Remove keys where converter returned None (invalid MACs)
+        return {k: v for k, v in params.items() if v is not None}
+
+    def _build_updates(self, existing_obj, aci_data, field_map=None,
+                       converters=None, extra_updates=None):
+        """Override to skip None values from MAC converter."""
+        updates = super()._build_updates(existing_obj, aci_data, field_map,
+                                         converters, extra_updates)
+        return {k: v for k, v in updates.items() if v is not None}
+
     def sync_object(self, aci_data: Dict[str, Any]) -> bool:
-        """Sync Bridge Domain to NetBox."""
         try:
             tenant_name = aci_data.get('tenant')
             if not tenant_name:
@@ -31,25 +92,22 @@ class BridgeDomainSyncModule(BaseSyncModule):
 
             tenant_map = self.context.get('tenant_map', {})
             tenant_id = tenant_map.get(tenant_name)
-            
             if not tenant_id:
                 logger.warning(f"Tenant {tenant_name} not found for BD {aci_data.get('name')}")
                 return False
 
+            # Resolve VRF (may be in different tenant, e.g. common)
             vrf_name = aci_data.get('vrf')
-            vrf_tenant = aci_data.get('vrf_tenant', tenant_name)  # VRF might be in different tenant (e.g., common)
+            vrf_tenant = aci_data.get('vrf_tenant', tenant_name)
             vrf_map = self.context.get('vrf_map', {})
-            
-            # Look up VRF using its actual tenant (might be different from BD's tenant)
             vrf_id = vrf_map.get(f"{vrf_tenant}/{vrf_name}") if vrf_name else None
-            
-            # NetBox ACI plugin requires VRF - skip BDs without VRF assignment
+
             if not vrf_id:
                 bd_name = aci_data.get('name')
                 if vrf_name:
                     logger.warning(f"VRF {vrf_tenant}/{vrf_name} not found for BD {tenant_name}/{bd_name} - skipping")
                 else:
-                    logger.warning(f"BD {tenant_name}/{bd_name} has no VRF assigned - NetBox ACI plugin requires VRF")
+                    logger.warning(f"BD {tenant_name}/{bd_name} has no VRF assigned - skipping")
                 return False
 
             bd_name = aci_data.get('name')
@@ -57,105 +115,35 @@ class BridgeDomainSyncModule(BaseSyncModule):
                 logger.warning(f"Skipping BD without name: {aci_data}")
                 return False
 
-            # Prepare BD parameters
-            bd_params = {}
-            
-            if aci_data.get('name_alias'):
-                bd_params['name_alias'] = aci_data['name_alias']
-            if aci_data.get('description'):
-                bd_params['description'] = aci_data['description']
-            
-            # BD-specific attributes mapping
-            bd_field_mapping = {
-                'arp_flood': 'arp_flooding_enabled',
-                'ip_learning': 'ip_data_plane_learning_enabled',
-                'limit_ip_learn': 'limit_ip_learn_enabled',
-                'mac': 'mac_address',
-                'multi_dest_pkt_act': 'multi_destination_flooding',
-                'unicast_route': 'unicast_routing_enabled',
-                'unk_mac_ucast_act': 'unknown_unicast',
-                'unk_mcast_act': 'unknown_ipv4_multicast',
-                'v6_unk_mcast_act': 'unknown_ipv6_multicast',
-                'vmac': 'virtual_mac_address',
-                'pim_v4_enabled': 'pim_ipv4_enabled',
-                'host_route_adv': 'advertise_host_routes_enabled',
-            }
+            bd_params = self._build_params(aci_data)
 
-            for aci_field, nb_field in bd_field_mapping.items():
-                if aci_field in aci_data and aci_data[aci_field] is not None:
-                    value = aci_data[aci_field]
-                    # Skip invalid MAC addresses like 'not-applicable'
-                    if nb_field in ('mac_address', 'virtual_mac_address'):
-                        if not value or value.lower() in ('not-applicable', 'n/a', 'none', ''):
-                            continue
-                        # Validate MAC format (basic check)
-                        if ':' not in value and '-' not in value:
-                            continue
-                    bd_params[nb_field] = value
-
-            # Handle ep_move_detect specially
-            if aci_data.get('ep_move_detect'):
-                bd_params['ep_move_detection_enabled'] = aci_data['ep_move_detect'] == 'garp'
-
-            bd, created = self.netbox.get_or_create_bridge_domain(
-                tenant_id=tenant_id,
-                vrf_id=vrf_id,
-                name=bd_name,
-                **bd_params
+            # Use per-tenant cache
+            cache = self._tenant_bd_caches.get(tenant_id, {})
+            bd, created = self.netbox.get_or_create_bd_cached(
+                cache, bd_name,
+                tenant_id=tenant_id, vrf_id=vrf_id, **bd_params
             )
 
             if created:
                 self.result.created += 1
                 logger.info(f"Created Bridge Domain: {tenant_name}/{bd_name}")
             else:
-                updates = {}
-                
-                # Check if VRF has changed (important for cross-tenant VRF references)
+                # Check VRF change (cross-tenant reference)
+                extra = {}
                 current_vrf = getattr(bd, 'aci_vrf', None)
                 current_vrf_id = current_vrf.id if hasattr(current_vrf, 'id') else current_vrf
                 if current_vrf_id != vrf_id:
-                    updates['aci_vrf'] = vrf_id
-                    logger.debug(f"BD {bd_name} VRF changed: {current_vrf_id} -> {vrf_id}")
-                
-                for aci_field, nb_field in bd_field_mapping.items():
-                    if aci_field in aci_data and aci_data[aci_field] is not None:
-                        value = aci_data[aci_field]
-                        # Skip invalid MAC addresses like 'not-applicable'
-                        if nb_field in ('mac_address', 'virtual_mac_address'):
-                            if not value or value.lower() in ('not-applicable', 'n/a', 'none', ''):
-                                continue
-                            if ':' not in value and '-' not in value:
-                                continue
-                        current = getattr(bd, nb_field, None)
-                        if not values_equal(current, value):
-                            updates[nb_field] = value
+                    extra['aci_vrf'] = vrf_id
 
-                if aci_data.get('name_alias'):
-                    current = getattr(bd, 'name_alias', None) or ''
-                    if current != aci_data['name_alias']:
-                        updates['name_alias'] = aci_data['name_alias']
-                if aci_data.get('description'):
-                    current = getattr(bd, 'description', None) or ''
-                    if current != aci_data['description']:
-                        updates['description'] = aci_data['description']
-
-                if updates:
-                    changed, verified = self.netbox.update_bridge_domain(
-                        bd, updates, self.settings.verify_updates
-                    )
-                    if changed:
-                        self.result.updated += 1
-                        if verified:
-                            self.result.verified += 1
-                        logger.info(f"Updated Bridge Domain: {tenant_name}/{bd_name}")
-                    else:
-                        self.result.unchanged += 1
-                else:
-                    self.result.unchanged += 1
+                updates = self._build_updates(bd, aci_data, extra_updates=extra)
+                self._apply_updates(
+                    bd, updates,
+                    f"{tenant_name}/{bd_name}",
+                    self.netbox.update_bridge_domain,
+                )
 
             bd_map = self.context.setdefault('bd_map', {})
             bd_map[f"{tenant_name}/{bd_name}"] = bd.id
-
             return True
 
         except Exception as e:
@@ -168,27 +156,44 @@ class BridgeDomainSyncModule(BaseSyncModule):
 class SubnetSyncModule(BaseSyncModule):
     """Sync ACI Bridge Domain Subnets to NetBox."""
 
+    FIELD_MAP = {
+        'name_alias': 'name_alias',
+        'description': 'description',
+        'preferred': 'preferred_ip_address_enabled',
+        'virtual': 'virtual_ip_enabled',
+    }
+
     @property
     def object_type(self) -> str:
         return "Subnet"
 
     def fetch_from_aci(self) -> List[Dict[str, Any]]:
-        """Fetch Subnets from ACI."""
         return self.aci.get_subnets()
 
+    def _build_scope_and_ctrl_params(self, aci_data: Dict) -> Dict[str, Any]:
+        """Extract scope and ctrl flags into NetBox fields."""
+        params = {}
+        if 'scope' in aci_data:
+            scope = aci_data['scope'] or ''
+            params['advertised_externally_enabled'] = 'public' in scope
+            params['shared_enabled'] = 'shared' in scope
+        if 'ctrl' in aci_data:
+            ctrl = aci_data['ctrl'] or ''
+            params['no_default_svi_gateway'] = 'no-default-gateway' in ctrl
+            params['nd_ra_enabled'] = 'nd' in ctrl
+            params['igmp_querier_enabled'] = 'querier' in ctrl
+        return params
+
     def sync_object(self, aci_data: Dict[str, Any]) -> bool:
-        """Sync Subnet to NetBox."""
         try:
             tenant_name = aci_data.get('tenant')
             bd_name = aci_data.get('bridge_domain')
-            
             if not tenant_name or not bd_name:
                 logger.warning(f"Skipping subnet without tenant/BD: {aci_data}")
                 return False
 
             bd_map = self.context.get('bd_map', {})
             bd_id = bd_map.get(f"{tenant_name}/{bd_name}")
-            
             if not bd_id:
                 logger.warning(f"BD {tenant_name}/{bd_name} not found for subnet")
                 return False
@@ -198,45 +203,24 @@ class SubnetSyncModule(BaseSyncModule):
                 logger.warning(f"Skipping subnet without IP: {aci_data}")
                 return False
 
-            # First, create or get the IP address in NetBox IPAM
-            # The gateway_ip_address field requires an IP address object ID
+            # Create/get gateway IP in IPAM
             ip_obj, ip_created = self.netbox.get_or_create_ip_address(
                 address=subnet_ip,
                 description=f"BD Subnet Gateway - {bd_name}"
             )
-            
             if ip_created:
                 logger.debug(f"Created IP address in IPAM: {subnet_ip}")
 
-            # Generate a name for the subnet (required field)
             subnet_name = aci_data.get('name') or f"{bd_name}-{subnet_ip.replace('/', '_')}"
 
-            # Prepare subnet parameters
-            subnet_params = {
-                'name': subnet_name,  # Required field
-            }
-            
-            if aci_data.get('name_alias'):
-                subnet_params['name_alias'] = aci_data['name_alias']
-            if aci_data.get('description'):
-                subnet_params['description'] = aci_data['description']
-            if 'preferred' in aci_data:
-                subnet_params['preferred_ip_address_enabled'] = aci_data['preferred']
-            if 'scope' in aci_data:
-                scope = aci_data['scope'] or ''
-                subnet_params['advertised_externally_enabled'] = 'public' in scope
-                subnet_params['shared_enabled'] = 'shared' in scope
-            if 'virtual' in aci_data:
-                subnet_params['virtual_ip_enabled'] = aci_data['virtual']
-            if 'ctrl' in aci_data:
-                ctrl = aci_data['ctrl'] or ''
-                subnet_params['no_default_svi_gateway'] = 'no-default-gateway' in ctrl
-                subnet_params['nd_ra_enabled'] = 'nd' in ctrl
-                subnet_params['igmp_querier_enabled'] = 'querier' in ctrl
+            # Build params
+            subnet_params = self._build_params(aci_data)
+            subnet_params['name'] = subnet_name
+            subnet_params.update(self._build_scope_and_ctrl_params(aci_data))
 
             subnet, created = self.netbox.get_or_create_subnet(
                 bd_id=bd_id,
-                gateway_ip=ip_obj.id,  # Pass the IP address object ID
+                gateway_ip=ip_obj.id,
                 **subnet_params
             )
 
@@ -244,34 +228,22 @@ class SubnetSyncModule(BaseSyncModule):
                 self.result.created += 1
                 logger.info(f"Created Subnet: {subnet_ip} in BD {bd_name}")
             else:
-                updates = {}
-                
-                # Check if BD has changed (subnet moved to different BD)
+                # Check BD change
+                extra = {}
                 current_bd = getattr(subnet, 'aci_bridge_domain', None)
                 current_bd_id = current_bd.id if hasattr(current_bd, 'id') else current_bd
                 if current_bd_id != bd_id:
-                    updates['aci_bridge_domain'] = bd_id
-                    logger.debug(f"Subnet {subnet_ip} BD changed: {current_bd_id} -> {bd_id}")
-                
-                for key, value in subnet_params.items():
+                    extra['aci_bridge_domain'] = bd_id
+
+                updates = self._build_updates(subnet, aci_data, extra_updates=extra)
+                # Also check scope/ctrl derived fields
+                scope_ctrl = self._build_scope_and_ctrl_params(aci_data)
+                for key, value in scope_ctrl.items():
                     current = getattr(subnet, key, None)
                     if not values_equal(current, value):
-                        logger.debug(f"Subnet {subnet_ip} field {key}: current={current!r}, new={value!r}")
                         updates[key] = value
 
-                if updates:
-                    changed, verified = self.netbox.update_subnet(
-                        subnet, updates, self.settings.verify_updates
-                    )
-                    if changed:
-                        self.result.updated += 1
-                        if verified:
-                            self.result.verified += 1
-                        logger.info(f"Updated Subnet: {subnet_ip}")
-                    else:
-                        self.result.unchanged += 1
-                else:
-                    self.result.unchanged += 1
+                self._apply_updates(subnet, updates, subnet_ip, self.netbox.update_subnet)
 
             return True
 
