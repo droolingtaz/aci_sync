@@ -7,6 +7,7 @@ Optimized with:
 - MAC validation in converters
 """
 
+import ipaddress
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
@@ -202,6 +203,19 @@ class SubnetSyncModule(BaseSyncModule):
             if not subnet_ip:
                 logger.warning(f"Skipping subnet without IP: {aci_data}")
                 return False
+
+            # Create/get the parent prefix in IPAM (e.g., 10.1.1.1/24 -> 10.1.1.0/24)
+            try:
+                network = ipaddress.ip_interface(subnet_ip).network
+                prefix_str = str(network)  # e.g., "10.1.1.0/24"
+                prefix_obj, prefix_created = self.netbox.get_or_create_prefix(
+                    prefix=prefix_str,
+                    description=f"BD Subnet - {bd_name}"
+                )
+                if prefix_created:
+                    logger.info(f"Created prefix in IPAM: {prefix_str}")
+            except ValueError as e:
+                logger.warning(f"Could not derive prefix from {subnet_ip}: {e}")
 
             # Create/get gateway IP in IPAM
             ip_obj, ip_created = self.netbox.get_or_create_ip_address(
