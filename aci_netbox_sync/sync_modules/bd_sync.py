@@ -217,13 +217,24 @@ class SubnetSyncModule(BaseSyncModule):
             except ValueError as e:
                 logger.warning(f"Could not derive prefix from {subnet_ip}: {e}")
 
-            # Create/get gateway IP in IPAM
+            # Create/get gateway IP in IPAM with Anycast role
             ip_obj, ip_created = self.netbox.get_or_create_ip_address(
                 address=subnet_ip,
-                description=f"BD Subnet Gateway - {bd_name}"
+                description=f"BD Subnet Gateway - {bd_name}",
+                role='anycast'
             )
             if ip_created:
-                logger.debug(f"Created IP address in IPAM: {subnet_ip}")
+                logger.debug(f"Created IP address in IPAM: {subnet_ip} (role=anycast)")
+            else:
+                # Ensure existing IP has role set to anycast
+                current_role = getattr(ip_obj, 'role', None)
+                current_role_val = current_role.value if hasattr(current_role, 'value') else current_role
+                if current_role_val != 'anycast':
+                    try:
+                        ip_obj.update({'role': 'anycast'})
+                        logger.debug(f"Updated IP {subnet_ip} role to anycast")
+                    except Exception as e:
+                        logger.warning(f"Could not update IP {subnet_ip} role to anycast: {e}")
 
             subnet_name = aci_data.get('name') or f"{bd_name}-{subnet_ip.replace('/', '_')}"
 
