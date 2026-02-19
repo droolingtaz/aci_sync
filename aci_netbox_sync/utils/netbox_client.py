@@ -507,9 +507,10 @@ class NetBoxClient:
     # ── Subnet Operations ─────────────────────────────────────────────
 
     def get_or_create_subnet(self, bd_id: int, gateway_ip: int, **kwargs) -> Tuple[Any, bool]:
+        """Get or create a BD Subnet. Looks up by gateway_ip alone (unique constraint)."""
         return self._get_or_create(
             self.aci_plugin.bridge_domain_subnets,
-            {'aci_bridge_domain_id': bd_id, 'gateway_ip_address_id': gateway_ip},
+            {'gateway_ip_address_id': gateway_ip},
             {'aci_bridge_domain': bd_id, 'gateway_ip_address': gateway_ip, **kwargs}
         )
 
