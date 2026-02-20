@@ -155,6 +155,38 @@ class NodeSyncModule(BaseSyncModule):
     def object_type(self) -> str:
         return "Node"
 
+    @staticmethod
+    def _normalize_model(model: str) -> str:
+        """
+        Normalize an ACI/Cisco model string to a canonical form for matching.
+
+        Strips common prefixes and suffixes so that ACI-reported names like
+        'N9K-C9508' can match NetBox entries like 'Nexus 9508'.
+
+        Examples:
+            N9K-C9508         -> 9508
+            Nexus 9508        -> 9508
+            N9K-C93180YC-FX   -> 93180ycfx
+            Nexus 93180YC-FX  -> 93180ycfx
+            APIC-SERVER-M3    -> m3
+            APIC-M3           -> m3
+            ACI-LEAF          -> leaf
+        """
+        s = model.strip()
+
+        # Strip common Cisco/ACI prefixes (order matters — longest first)
+        for prefix in ('N9K-C', 'N9K-', 'N5K-C', 'N5K-', 'N3K-C', 'N3K-',
+                       'N77-C', 'N77-', 'N7K-C', 'N7K-',
+                       'APIC-SERVER-', 'APIC-',
+                       'Nexus ', 'nexus ',
+                       'ACI-'):
+            if s.startswith(prefix) or s.lower().startswith(prefix.lower()):
+                s = s[len(prefix):]
+                break
+
+        # Lowercase, strip hyphens/spaces/underscores for comparison
+        return s.lower().replace('-', '').replace(' ', '').replace('_', '')
+
     def pre_sync(self) -> None:
         """Pre-fetch existing nodes and cache DCIM helper objects."""
         fabric_id = self.context.get('fabric_id')
@@ -167,18 +199,58 @@ class NodeSyncModule(BaseSyncModule):
         fabric_name = self.context.get('fabric_name', 'ACI-Fabric')
         self._site, _ = self.netbox.get_or_create_site(fabric_name)
 
-        # Cache device types and roles to avoid repeated lookups
+        # Pre-fetch all existing Cisco device types and build normalized index
         self._device_type_cache: Dict[str, Any] = {}
         self._device_role_cache: Dict[str, Any] = {}
 
+        existing_types = self.netbox.fetch_all_device_types(self._manufacturer.id)
+        self._normalized_device_types: Dict[str, Any] = {}
+        for dt in existing_types:
+            model_str = getattr(dt, 'model', '') or ''
+            norm = self._normalize_model(model_str)
+            if norm:
+                self._normalized_device_types[norm] = dt
+                # Also cache by exact model so later lookups hit the cache
+                self._device_type_cache[model_str] = dt
+        logger.debug(
+            f"Pre-fetched {len(existing_types)} Cisco device types, "
+            f"{len(self._normalized_device_types)} normalized entries"
+        )
+
     def _get_device_type(self, model: str) -> Any:
-        """Get or create device type with caching."""
-        if model not in self._device_type_cache:
-            dt, _ = self.netbox.get_or_create_device_type(
-                manufacturer_id=self._manufacturer.id, model=model
+        """
+        Get device type, matching against existing NetBox entries first.
+
+        Lookup order:
+        1. Exact match in cache (already seen this run)
+        2. Normalized match against pre-fetched Cisco device types
+        3. Create new device type if no match found
+        """
+        # 1. Exact cache hit
+        if model in self._device_type_cache:
+            return self._device_type_cache[model]
+
+        # 2. Normalized match against existing NetBox device types
+        norm = self._normalize_model(model)
+        if norm and norm in self._normalized_device_types:
+            dt = self._normalized_device_types[norm]
+            existing_model = getattr(dt, 'model', model)
+            logger.info(
+                f"Matched ACI model '{model}' to existing NetBox device type '{existing_model}'"
             )
             self._device_type_cache[model] = dt
-        return self._device_type_cache[model]
+            return dt
+
+        # 3. No match — create new device type
+        logger.debug(f"No existing device type match for '{model}', creating new")
+        dt, _ = self.netbox.get_or_create_device_type(
+            manufacturer_id=self._manufacturer.id, model=model
+        )
+        self._device_type_cache[model] = dt
+        # Also register in normalized index so future ACI models can match
+        if norm:
+            self._normalized_device_types[norm] = dt
+        return dt
 
     def _get_device_role(self, role_name: str) -> Any:
         """Get or create device role with caching."""

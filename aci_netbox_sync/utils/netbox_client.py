@@ -836,6 +836,14 @@ class NetBoxClient:
             {'manufacturer': manufacturer_id, 'model': model, 'slug': slug, **kwargs}
         )
 
+    def fetch_all_device_types(self, manufacturer_id: int) -> List[Any]:
+        """Fetch all device types for a manufacturer."""
+        try:
+            return list(self.api.dcim.device_types.filter(manufacturer_id=manufacturer_id))
+        except Exception as e:
+            logger.error(f"Failed to fetch device types for manufacturer {manufacturer_id}: {e}")
+            return []
+
     def get_or_create_manufacturer(self, name: str) -> Tuple[Any, bool]:
         slug = name.lower().replace(' ', '-')[:50]
         return self._get_or_create(
