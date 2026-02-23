@@ -4,7 +4,8 @@ ACI to NetBox Synchronization - Main Entry Point
 
 Synchronizes Cisco ACI objects to NetBox using the ACI plugin.
 Supports all major ACI objects: Fabrics, Pods, Nodes, Tenants, VRFs,
-Bridge Domains, Subnets, Application Profiles, EPGs, ESGs, and Contracts.
+Bridge Domains, Subnets, Application Profiles, EPGs, ESGs, Contracts,
+and Software Versions (via netbox-software-tracker plugin).
 
 Usage:
     python -m aci_netbox_sync [options]
@@ -42,9 +43,17 @@ from .sync_modules import (
     ESGSyncModule,
     ContractFilterSyncModule,
     ContractSyncModule,
+    SoftwareVersionSyncModule,
 )
 
 logger = logging.getLogger(__name__)
+
+# Valid object type choices for CLI
+OBJECT_TYPE_CHOICES = [
+    'fabric', 'pods', 'nodes', 'tenants', 'vrfs',
+    'bds', 'subnets', 'aps', 'epgs', 'esgs', 'contracts',
+    'software',
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,12 +84,10 @@ def parse_args() -> argparse.Namespace:
     
     # Object selection
     parser.add_argument('--only', nargs='+', 
-                        choices=['fabric', 'pods', 'nodes', 'tenants', 'vrfs', 
-                                'bds', 'subnets', 'aps', 'epgs', 'esgs', 'contracts'],
+                        choices=OBJECT_TYPE_CHOICES,
                         help='Only sync specified object types')
     parser.add_argument('--skip', nargs='+',
-                        choices=['fabric', 'pods', 'nodes', 'tenants', 'vrfs',
-                                'bds', 'subnets', 'aps', 'epgs', 'esgs', 'contracts'],
+                        choices=OBJECT_TYPE_CHOICES,
                         help='Skip specified object types')
     
     # Logging options
@@ -105,6 +112,7 @@ def get_modules_to_sync(args: argparse.Namespace) -> list:
         'epgs': EPGSyncModule,
         'esgs': ESGSyncModule,
         'contracts': ContractSyncModule,
+        'software': SoftwareVersionSyncModule,
     }
     
     if args.only:

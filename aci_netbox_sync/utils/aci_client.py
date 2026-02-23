@@ -707,3 +707,230 @@ class ACIClient:
         except Exception as e:
             logger.error(f"Error retrieving Contract Filters: {e}")
         return filters
+
+    # =========================================================================
+    # Firmware Detail Methods
+    # =========================================================================
+    #
+    # Queries multiple APIC firmware classes to build a comprehensive mapping
+    # of version -> {filename, checksum, type}. On real fabrics with staged
+    # firmware images, these classes contain image filenames and checksums.
+    #
+    # Queried classes:
+    #   firmwareRunning       - Running firmware on switch nodes
+    #   firmwareCtrlrRunning  - Running firmware on APIC controllers
+    #   firmwareFirmware      - Firmware images in the APIC repository
+    #   firmwareOSource       - Firmware download sources
+    #   firmwareCompRunning   - Component-level firmware (BIOS, CIMC, etc.)
+    #
+    # On simulators/sandboxes, most of these return minimal data. On real
+    # hardware, firmwareFirmware will have image files with names/checksums
+    # if firmware has been staged via the APIC firmware repository.
+    # =========================================================================
+
+    def get_firmware_details(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get detailed firmware information from ACI, including filenames
+        and checksums when available.
+
+        Returns a dict keyed by version string, where each value contains:
+            {
+                'version': str,          # e.g. '6.1(4h)'
+                'filename': str or None, # e.g. 'aci-n9000-dk9.16.1.4h.bin'
+                'checksum': str or None, # MD5 or SHA hash if available
+                'type': str,             # 'switch', 'controller', or 'unknown'
+                'internal_label': str or None,  # Build label from APIC
+                'node_dn': str or None,  # DN of the node running this version
+            }
+        """
+        firmware_map: Dict[str, Dict[str, Any]] = {}
+
+        # --- 1. Query firmwareRunning (switch nodes) ---
+        try:
+            running_objs = self._query_class("firmwareRunning")
+            for fw in running_objs:
+                version = str(fw.version) if hasattr(fw, 'version') and fw.version else None
+                if not version:
+                    continue
+
+                entry = firmware_map.setdefault(version, {
+                    'version': version,
+                    'filename': None,
+                    'checksum': None,
+                    'type': 'switch',
+                    'internal_label': None,
+                    'node_dn': None,
+                })
+
+                # Extract whatever attributes are available
+                for attr in ['fwName', 'fileName', 'fullVersion']:
+                    if hasattr(fw, attr):
+                        val = str(getattr(fw, attr))
+                        if val and val not in ('', 'None', 'none'):
+                            entry['filename'] = val
+                            break
+
+                for attr in ['checksum', 'md5sum', 'md5']:
+                    if hasattr(fw, attr):
+                        val = str(getattr(fw, attr))
+                        if val and val not in ('', 'None', 'none'):
+                            entry['checksum'] = val
+                            break
+
+                if hasattr(fw, 'internalLabel') and fw.internalLabel:
+                    entry['internal_label'] = str(fw.internalLabel)
+
+                if hasattr(fw, 'dn'):
+                    entry['node_dn'] = str(fw.dn)
+
+                entry['type'] = 'switch'
+
+            logger.debug(f"firmwareRunning: found {len(running_objs)} entries")
+        except Exception as e:
+            logger.debug(f"Could not query firmwareRunning: {e}")
+
+        # --- 2. Query firmwareCtrlrRunning (APIC controllers) ---
+        try:
+            ctrl_objs = self._query_class("firmwareCtrlrRunning")
+            for fw in ctrl_objs:
+                version = str(fw.version) if hasattr(fw, 'version') and fw.version else None
+                if not version:
+                    continue
+
+                entry = firmware_map.setdefault(version, {
+                    'version': version,
+                    'filename': None,
+                    'checksum': None,
+                    'type': 'controller',
+                    'internal_label': None,
+                    'node_dn': None,
+                })
+
+                # Controller entries often have internalLabel (SHA1 build hash)
+                if hasattr(fw, 'internalLabel') and fw.internalLabel:
+                    entry['internal_label'] = str(fw.internalLabel)
+
+                for attr in ['fwName', 'fileName', 'fullVersion']:
+                    if hasattr(fw, attr):
+                        val = str(getattr(fw, attr))
+                        if val and val not in ('', 'None', 'none'):
+                            entry['filename'] = val
+                            break
+
+                for attr in ['checksum', 'md5sum', 'md5']:
+                    if hasattr(fw, attr):
+                        val = str(getattr(fw, attr))
+                        if val and val not in ('', 'None', 'none'):
+                            entry['checksum'] = val
+                            break
+
+                if hasattr(fw, 'dn'):
+                    entry['node_dn'] = str(fw.dn)
+
+                # Only set type if not already set by switch
+                if entry['type'] == 'unknown':
+                    entry['type'] = 'controller'
+
+            logger.debug(f"firmwareCtrlrRunning: found {len(ctrl_objs)} entries")
+        except Exception as e:
+            logger.debug(f"Could not query firmwareCtrlrRunning: {e}")
+
+        # --- 3. Query firmwareFirmware (staged images in APIC repo) ---
+        # This is the most likely source of filenames and checksums on
+        # real fabrics where firmware has been downloaded to the APIC.
+        try:
+            repo_objs = self._query_class("firmwareFirmware")
+            for fw in repo_objs:
+                version = None
+                filename = None
+                checksum = None
+
+                # Try to extract version
+                for attr in ['version', 'fwVersion', 'name']:
+                    if hasattr(fw, attr):
+                        val = str(getattr(fw, attr))
+                        if val and val not in ('', 'None', 'none'):
+                            version = val
+                            break
+
+                # Try to extract filename
+                for attr in ['fileName', 'fwName', 'name', 'fullName']:
+                    if hasattr(fw, attr):
+                        val = str(getattr(fw, attr))
+                        if val and val not in ('', 'None', 'none') and ('.' in val or 'aci' in val.lower()):
+                            filename = val
+                            break
+
+                # Try to extract checksum
+                for attr in ['checksum', 'md5sum', 'md5', 'digest']:
+                    if hasattr(fw, attr):
+                        val = str(getattr(fw, attr))
+                        if val and val not in ('', 'None', 'none'):
+                            checksum = val
+                            break
+
+                if version and version in firmware_map:
+                    # Enrich existing entry from running firmware
+                    if filename:
+                        firmware_map[version]['filename'] = filename
+                    if checksum:
+                        firmware_map[version]['checksum'] = checksum
+                elif version:
+                    # New version only in repo (not currently running)
+                    firmware_map[version] = {
+                        'version': version,
+                        'filename': filename,
+                        'checksum': checksum,
+                        'type': 'staged',
+                        'internal_label': None,
+                        'node_dn': None,
+                    }
+
+            logger.debug(f"firmwareFirmware: found {len(repo_objs)} entries")
+        except Exception as e:
+            logger.debug(f"Could not query firmwareFirmware: {e}")
+
+        # --- 4. Query firmwareCompRunning for additional component details ---
+        # This can have BIOS/CIMC versions with more detail
+        try:
+            comp_objs = self._query_class("firmwareCompRunning")
+            for fw in comp_objs:
+                version = str(fw.version) if hasattr(fw, 'version') and fw.version else None
+                if not version or version not in firmware_map:
+                    continue
+
+                # Only fill in missing data
+                entry = firmware_map[version]
+                if not entry.get('checksum'):
+                    for attr in ['checksum', 'md5sum', 'md5']:
+                        if hasattr(fw, attr):
+                            val = str(getattr(fw, attr))
+                            if val and val not in ('', 'None', 'none'):
+                                entry['checksum'] = val
+                                break
+
+            logger.debug(f"firmwareCompRunning: found {len(comp_objs)} entries")
+        except Exception as e:
+            logger.debug(f"Could not query firmwareCompRunning: {e}")
+
+        # --- 5. Try firmwareOSource for download source info ---
+        try:
+            src_objs = self._query_class("firmwareOSource")
+            for src in src_objs:
+                # May contain URL/path to firmware image
+                for attr in ['url', 'source', 'path']:
+                    if hasattr(src, attr):
+                        val = str(getattr(src, attr))
+                        if val and val not in ('', 'None', 'none'):
+                            logger.debug(f"firmwareOSource {attr}: {val}")
+            logger.debug(f"firmwareOSource: found {len(src_objs)} entries")
+        except Exception as e:
+            logger.debug(f"Could not query firmwareOSource: {e}")
+
+        logger.info(
+            f"Firmware details: found metadata for {len(firmware_map)} version(s), "
+            f"{sum(1 for v in firmware_map.values() if v.get('filename'))} with filename, "
+            f"{sum(1 for v in firmware_map.values() if v.get('checksum'))} with checksum"
+        )
+
+        return firmware_map

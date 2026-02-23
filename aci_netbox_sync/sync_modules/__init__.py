@@ -9,6 +9,7 @@ from .ap_sync import AppProfileSyncModule
 from .epg_sync import EPGSyncModule
 from .esg_sync import ESGSyncModule
 from .contract_sync import ContractFilterSyncModule, ContractSyncModule, ContractRelationshipSyncModule
+from .software_sync import SoftwareVersionSyncModule
 
 __all__ = [
     'BaseSyncModule',
@@ -28,6 +29,7 @@ __all__ = [
     'ContractFilterSyncModule',
     'ContractSyncModule',
     'ContractRelationshipSyncModule',
+    'SoftwareVersionSyncModule',
 ]
 
 # Ordered list of modules for proper dependency resolution
@@ -45,4 +47,5 @@ SYNC_MODULE_ORDER = [
     ContractFilterSyncModule,  # Depends on tenants
     ContractSyncModule,    # Depends on tenants, filters
     ContractRelationshipSyncModule,  # Depends on contracts, EPGs, VRFs
+    SoftwareVersionSyncModule,  # Depends on nodes (for version data + device assignment)
 ]
